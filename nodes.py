@@ -43,6 +43,7 @@ def interrupt_processing(value=True):
     comfy.model_management.interrupt_current_processing(value)
 
 MAX_RESOLUTION=16384
+Image.MAX_IMAGE_PIXELS = None
 
 class CLIPTextEncode:
     @classmethod
@@ -1469,6 +1470,7 @@ class LoadImage:
         image_path = folder_paths.get_annotated_filepath(image)
         
         img = node_helpers.pillow(Image.open, image_path)
+        img = img.convert("RGB")
         
         output_images = []
         output_masks = []
