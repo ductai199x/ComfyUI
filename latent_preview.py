@@ -9,7 +9,7 @@ import folder_paths
 import comfy.utils
 import logging
 
-MAX_PREVIEW_RESOLUTION = 512
+MAX_PREVIEW_RESOLUTION = args.preview_size
 
 def preview_to_image(latent_image):
         latents_ubyte = (((latent_image + 1.0) / 2.0).clamp(0, 1)  # change scale from -1..1 to 0..1
@@ -36,12 +36,20 @@ class TAESDPreviewerImpl(LatentPreviewer):
 
 
 class Latent2RGBPreviewer(LatentPreviewer):
-    def __init__(self, latent_rgb_factors):
-        self.latent_rgb_factors = torch.tensor(latent_rgb_factors, device="cpu")
+    def __init__(self, latent_rgb_factors, latent_rgb_factors_bias=None):
+        self.latent_rgb_factors = torch.tensor(latent_rgb_factors, device="cpu").transpose(0, 1)
+        self.latent_rgb_factors_bias = None
+        if latent_rgb_factors_bias is not None:
+            self.latent_rgb_factors_bias = torch.tensor(latent_rgb_factors_bias, device="cpu")
 
     def decode_latent_to_preview(self, x0):
         self.latent_rgb_factors = self.latent_rgb_factors.to(dtype=x0.dtype, device=x0.device)
-        latent_image = x0[0].permute(1, 2, 0) @ self.latent_rgb_factors
+        if self.latent_rgb_factors_bias is not None:
+            self.latent_rgb_factors_bias = self.latent_rgb_factors_bias.to(dtype=x0.dtype, device=x0.device)
+
+        latent_image = torch.nn.functional.linear(x0[0].permute(1, 2, 0), self.latent_rgb_factors, bias=self.latent_rgb_factors_bias)
+        # latent_image = x0[0].permute(1, 2, 0) @ self.latent_rgb_factors
+
         return preview_to_image(latent_image)
 
 
@@ -64,14 +72,14 @@ def get_previewer(device, latent_format):
 
         if method == LatentPreviewMethod.TAESD:
             if taesd_decoder_path:
-                taesd = TAESD(None, taesd_decoder_path).to(device)
+                taesd = TAESD(None, taesd_decoder_path, latent_channels=latent_format.latent_channels).to(device)
                 previewer = TAESDPreviewerImpl(taesd)
             else:
                 logging.warning("Warning: TAESD previews enabled, but could not find models/vae_approx/{}".format(latent_format.taesd_decoder_name))
 
         if previewer is None:
             if latent_format.latent_rgb_factors is not None:
-                previewer = Latent2RGBPreviewer(latent_format.latent_rgb_factors)
+                previewer = Latent2RGBPreviewer(latent_format.latent_rgb_factors, latent_format.latent_rgb_factors_bias)
     return previewer
 
 def prepare_callback(model, steps, x0_output_dict=None):

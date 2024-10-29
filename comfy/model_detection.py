@@ -1,7 +1,9 @@
 import comfy.supported_models
 import comfy.supported_models_base
+import comfy.utils
 import math
 import logging
+import torch
 
 def count_blocks(state_dict_keys, prefix_string):
     count = 0
@@ -39,7 +41,9 @@ def detect_unet_config(state_dict, key_prefix):
         unet_config["in_channels"] = state_dict['{}x_embedder.proj.weight'.format(key_prefix)].shape[1]
         patch_size = state_dict['{}x_embedder.proj.weight'.format(key_prefix)].shape[2]
         unet_config["patch_size"] = patch_size
-        unet_config["out_channels"] = state_dict['{}final_layer.linear.weight'.format(key_prefix)].shape[0] // (patch_size * patch_size)
+        final_layer = '{}final_layer.linear.weight'.format(key_prefix)
+        if final_layer in state_dict:
+            unet_config["out_channels"] = state_dict[final_layer].shape[0] // (patch_size * patch_size)
 
         unet_config["depth"] = state_dict['{}x_embedder.proj.weight'.format(key_prefix)].shape[0] // 64
         unet_config["input_size"] = None
@@ -66,6 +70,11 @@ def detect_unet_config(state_dict, key_prefix):
         context_processor = '{}context_processor.layers.0.attn.qkv.weight'.format(key_prefix)
         if context_processor in state_dict_keys:
             unet_config["context_processor_layers"] = count_blocks(state_dict_keys, '{}context_processor.layers.'.format(key_prefix) + '{}.')
+        unet_config["x_block_self_attn_layers"] = []
+        for key in state_dict_keys:
+            if key.startswith('{}joint_blocks.'.format(key_prefix)) and key.endswith('.x_block.attn2.qkv.weight'):
+                layer = key[len('{}joint_blocks.'.format(key_prefix)):-len('.x_block.attn2.qkv.weight')]
+                unet_config["x_block_self_attn_layers"].append(int(layer))
         return unet_config
 
     if '{}clf.1.weight'.format(key_prefix) in state_dict_keys: #stable cascade
@@ -95,6 +104,82 @@ def detect_unet_config(state_dict, key_prefix):
                 unet_config['blocks'] = [[2, 4, 14, 4], [4, 14, 4, 2]]
                 unet_config['block_repeat'] = [[1, 1, 1, 1], [2, 2, 2, 2]]
         return unet_config
+
+    if '{}transformer.rotary_pos_emb.inv_freq'.format(key_prefix) in state_dict_keys: #stable audio dit
+        unet_config = {}
+        unet_config["audio_model"] = "dit1.0"
+        return unet_config
+
+    if '{}double_layers.0.attn.w1q.weight'.format(key_prefix) in state_dict_keys: #aura flow dit
+        unet_config = {}
+        unet_config["max_seq"] = state_dict['{}positional_encoding'.format(key_prefix)].shape[1]
+        unet_config["cond_seq_dim"] = state_dict['{}cond_seq_linear.weight'.format(key_prefix)].shape[1]
+        double_layers = count_blocks(state_dict_keys, '{}double_layers.'.format(key_prefix) + '{}.')
+        single_layers = count_blocks(state_dict_keys, '{}single_layers.'.format(key_prefix) + '{}.')
+        unet_config["n_double_layers"] = double_layers
+        unet_config["n_layers"] = double_layers + single_layers
+        return unet_config
+
+    if '{}mlp_t5.0.weight'.format(key_prefix) in state_dict_keys: #Hunyuan DiT
+        unet_config = {}
+        unet_config["image_model"] = "hydit"
+        unet_config["depth"] = count_blocks(state_dict_keys, '{}blocks.'.format(key_prefix) + '{}.')
+        unet_config["hidden_size"] = state_dict['{}x_embedder.proj.weight'.format(key_prefix)].shape[0]
+        if unet_config["hidden_size"] == 1408 and unet_config["depth"] == 40: #DiT-g/2
+            unet_config["mlp_ratio"] = 4.3637
+        if state_dict['{}extra_embedder.0.weight'.format(key_prefix)].shape[1] == 3968:
+            unet_config["size_cond"] = True
+            unet_config["use_style_cond"] = True
+            unet_config["image_model"] = "hydit1"
+        return unet_config
+
+    if '{}double_blocks.0.img_attn.norm.key_norm.scale'.format(key_prefix) in state_dict_keys: #Flux
+        dit_config = {}
+        dit_config["image_model"] = "flux"
+        dit_config["in_channels"] = 16
+        dit_config["vec_in_dim"] = 768
+        dit_config["context_in_dim"] = 4096
+        dit_config["hidden_size"] = 3072
+        dit_config["mlp_ratio"] = 4.0
+        dit_config["num_heads"] = 24
+        dit_config["depth"] = count_blocks(state_dict_keys, '{}double_blocks.'.format(key_prefix) + '{}.')
+        dit_config["depth_single_blocks"] = count_blocks(state_dict_keys, '{}single_blocks.'.format(key_prefix) + '{}.')
+        dit_config["axes_dim"] = [16, 56, 56]
+        dit_config["theta"] = 10000
+        dit_config["qkv_bias"] = True
+        dit_config["guidance_embed"] = "{}guidance_in.in_layer.weight".format(key_prefix) in state_dict_keys
+        return dit_config
+
+    if '{}t5_yproj.weight'.format(key_prefix) in state_dict_keys: #Genmo mochi preview
+        dit_config = {}
+        dit_config["image_model"] = "mochi_preview"
+        dit_config["depth"] = 48
+        dit_config["patch_size"] = 2
+        dit_config["num_heads"] = 24
+        dit_config["hidden_size_x"] = 3072
+        dit_config["hidden_size_y"] = 1536
+        dit_config["mlp_ratio_x"] = 4.0
+        dit_config["mlp_ratio_y"] = 4.0
+        dit_config["learn_sigma"] = False
+        dit_config["in_channels"] = 12
+        dit_config["qk_norm"] = True
+        dit_config["qkv_bias"] = False
+        dit_config["out_bias"] = True
+        dit_config["attn_drop"] = 0.0
+        dit_config["patch_embed_bias"] = True
+        dit_config["posenc_preserve_area"] = True
+        dit_config["timestep_mlp_bias"] = True
+        dit_config["attend_to_padding"] = False
+        dit_config["timestep_scale"] = 1000.0
+        dit_config["use_t5"] = True
+        dit_config["t5_feat_dim"] = 4096
+        dit_config["t5_token_length"] = 256
+        dit_config["rope_theta"] = 10000.0
+        return dit_config
+
+
+    if '{}input_blocks.0.0.weight'.format(key_prefix) not in state_dict_keys:
+        return None
 
     unet_config = {
         "use_checkpoint": False,
@@ -230,11 +315,37 @@ def model_config_from_unet_config(unet_config, state_dict=None):
 
 def model_config_from_unet(state_dict, unet_key_prefix, use_base_if_no_match=False):
     unet_config = detect_unet_config(state_dict, unet_key_prefix)
+    if unet_config is None:
+        return None
     model_config = model_config_from_unet_config(unet_config, state_dict)
     if model_config is None and use_base_if_no_match:
-        return comfy.supported_models_base.BASE(unet_config)
+        model_config = comfy.supported_models_base.BASE(unet_config)
+
+    scaled_fp8_weight = state_dict.get("{}scaled_fp8".format(unet_key_prefix), None)
+    if scaled_fp8_weight is not None:
+        model_config.scaled_fp8 = scaled_fp8_weight.dtype
+        if model_config.scaled_fp8 == torch.float32:
+            model_config.scaled_fp8 = torch.float8_e4m3fn
+
+    return model_config
+
+def unet_prefix_from_state_dict(state_dict):
+    candidates = ["model.diffusion_model.", #ldm/sgm models
+                  "model.model.", #audio models
+                  ]
+    counts = {k: 0 for k in candidates}
+    for k in state_dict:
+        for c in candidates:
+            if k.startswith(c):
+                counts[c] += 1
+                break
+
+    top = max(counts, key=counts.get)
+    if counts[top] > 5:
+        return top
     else:
-        return model_config
+        return "model." #aura flow and others
+
 
 def convert_config(unet_config):
     new_config = unet_config.copy()
@@ -400,9 +511,15 @@ def unet_config_from_diffusers_unet(state_dict, dtype=None):
             'transformer_depth': [0, 1, 1], 'channel_mult': [1, 2, 4], 'transformer_depth_middle': -2, 'use_linear_in_transformer': False,
             'context_dim': 768, 'num_head_channels': 64, 'transformer_depth_output': [0, 0, 1, 1, 1, 1],
             'use_temporal_attention': False, 'use_temporal_resblock': False}
+    
+    SD15_diffusers_inpaint = {'use_checkpoint': False, 'image_size': 32, 'out_channels': 4, 'use_spatial_transformer': True, 'legacy': False, 'adm_in_channels': None,
+            'dtype': dtype, 'in_channels': 9, 'model_channels': 320, 'num_res_blocks': [2, 2, 2, 2], 'transformer_depth': [1, 1, 1, 1, 1, 1, 0, 0],
+            'channel_mult': [1, 2, 4, 4], 'transformer_depth_middle': 1, 'use_linear_in_transformer': False, 'context_dim': 768, 'num_heads': 8,
+            'transformer_depth_output': [1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+            'use_temporal_attention': False, 'use_temporal_resblock': False}  
 
 
-    supported_models = [SDXL, SDXL_refiner, SD21, SD15, SD21_uncliph, SD21_unclipl, SDXL_mid_cnet, SDXL_small_cnet, SDXL_diffusers_inpaint, SSD_1B, Segmind_Vega, KOALA_700M, KOALA_1B, SD09_XS, SD_XS, SDXL_diffusers_ip2p]
+    supported_models = [SDXL, SDXL_refiner, SD21, SD15, SD21_uncliph, SD21_unclipl, SDXL_mid_cnet, SDXL_small_cnet, SDXL_diffusers_inpaint, SSD_1B, Segmind_Vega, KOALA_700M, KOALA_1B, SD09_XS, SD_XS, SDXL_diffusers_ip2p, SD15_diffusers_inpaint]
 
     for unet_config in supported_models:
         matches = True
@@ -419,3 +536,57 @@ def model_config_from_diffusers_unet(state_dict):
     if unet_config is not None:
         return model_config_from_unet_config(unet_config)
     return None
+
+def convert_diffusers_mmdit(state_dict, output_prefix=""):
+    out_sd = {}
+
+    if 'transformer_blocks.0.attn.norm_added_k.weight' in state_dict: #Flux
+        depth = count_blocks(state_dict, 'transformer_blocks.{}.')
+        depth_single_blocks = count_blocks(state_dict, 'single_transformer_blocks.{}.')
+        hidden_size = state_dict["x_embedder.bias"].shape[0]
+        sd_map = comfy.utils.flux_to_diffusers({"depth": depth, "depth_single_blocks": depth_single_blocks, "hidden_size": hidden_size}, output_prefix=output_prefix)
+    elif 'transformer_blocks.0.attn.add_q_proj.weight' in state_dict: #SD3
+        num_blocks = count_blocks(state_dict, 'transformer_blocks.{}.')
+        depth = state_dict["pos_embed.proj.weight"].shape[0] // 64
+        sd_map = comfy.utils.mmdit_to_diffusers({"depth": depth, "num_blocks": num_blocks}, output_prefix=output_prefix)
+    elif 'joint_transformer_blocks.0.attn.add_k_proj.weight' in state_dict: #AuraFlow
+        num_joint = count_blocks(state_dict, 'joint_transformer_blocks.{}.')
+        num_single = count_blocks(state_dict, 'single_transformer_blocks.{}.')
+        sd_map = comfy.utils.auraflow_to_diffusers({"n_double_layers": num_joint, "n_layers": num_joint + num_single}, output_prefix=output_prefix)
+    else:
+        return None
+
+    for k in sd_map:
+        weight = state_dict.get(k, None)
+        if weight is not None:
+            t = sd_map[k]
+
+            if not isinstance(t, str):
+                if len(t) > 2:
+                    fun = t[2]
+                else:
+                    fun = lambda a: a
+                offset = t[1]
+                if offset is not None:
+                    old_weight = out_sd.get(t[0], None)
+                    if old_weight is None:
+                        old_weight = torch.empty_like(weight)
+                    if old_weight.shape[offset[0]] < offset[1] + offset[2]:
+                        exp = list(weight.shape)
+                        exp[offset[0]] = offset[1] + offset[2]
+                        new = torch.empty(exp, device=weight.device, dtype=weight.dtype)
+                        new[:old_weight.shape[0]] = old_weight
+                        old_weight = new
+
+                    w = old_weight.narrow(offset[0], offset[1], offset[2])
+                else:
+                    old_weight = weight
+                    w = weight
+                w[:] = fun(weight)
+                t = t[0]
+                out_sd[t] = old_weight
+            else:
+                out_sd[t] = weight
+            state_dict.pop(k)
+
+    return out_sd

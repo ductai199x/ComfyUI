@@ -9,8 +9,10 @@ __pycache__/
 !custom_nodes/example_node.py.example
 extra_model_paths.yaml
 /.vs
+.vscode/
 .idea/
 venv/
+.venv/
 /web/extensions/*
 !/web/extensions/logging.js.example
 !/web/extensions/core/
@@ -18,3 +20,6 @@ venv/
 /user/
 *log*
 temp
+*.log
+web_custom_versions/
+.DS_Store
